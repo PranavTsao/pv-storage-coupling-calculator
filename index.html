@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="基于8760小时时序仿真的家庭PV与储能耦合计算器">
+  <title>家庭 PV–储能耦合计算器</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23081824'/%3E%3Ccircle cx='20' cy='21' r='8' fill='%23ffbd4a'/%3E%3Cpath d='M35 19h17v28H27V27h8z' fill='none' stroke='%2368d7ca' stroke-width='4'/%3E%3Cpath d='M33 34h13M39.5 28v12' stroke='%2368d7ca' stroke-width='4'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./economics.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">8760 h ENERGY MODEL</p>
+      <h1>家庭 PV–储能耦合计算器</h1>
+      <p class="subtitle">Residential PV–Battery Coupling Calculator</p>
+    </div>
+    <div class="method-badge"><span></span>逐小时能量平衡 · Hourly simulation</div>
+  </header>
+
+  <main>
+    <section class="workspace" aria-label="计算器工作区">
+      <aside class="controls panel">
+        <div class="panel-title">
+          <div><span class="step">01</span><h2>系统输入</h2></div>
+          <button id="resetBtn" class="text-button" type="button">恢复默认</button>
+        </div>
+
+        <label class="field">
+          <span><b>家庭年用电量</b><small>Annual consumption</small></span>
+          <span class="input-wrap"><input id="loadInput" type="number" min="500" max="30000" step="100" value="4500"><i>kWh/a</i></span>
+          <input id="loadRange" type="range" min="500" max="15000" step="100" value="4500">
+        </label>
+
+        <label class="field">
+          <span><b>PV 装机容量</b><small>PV capacity</small></span>
+          <span class="input-wrap"><input id="pvInput" type="number" min="0.1" max="50" step="0.1" value="6"><i>kWp</i></span>
+          <input id="pvRange" type="range" min="0.1" max="20" step="0.1" value="6">
+        </label>
+
+        <label class="field">
+          <span><b>储能可用容量</b><small>Usable battery capacity</small></span>
+          <span class="input-wrap"><input id="batteryInput" type="number" min="0" max="50" step="0.1" value="5"><i>kWh</i></span>
+          <input id="batteryRange" type="range" min="0" max="20" step="0.1" value="5">
+        </label>
+
+        <details>
+          <summary>模型假设 <small>Model assumptions</small></summary>
+          <div class="details-grid">
+            <label><span>比发电量 <small>Specific yield</small></span><span class="input-wrap compact"><input id="yieldInput" type="number" min="500" max="1500" step="10" value="930"><i>kWh/kWp</i></span></label>
+            <label><span>往返效率 <small>Round-trip efficiency</small></span><span class="input-wrap compact"><input id="effInput" type="number" min="60" max="99" step="1" value="90"><i>%</i></span></label>
+            <label><span>充放电功率 <small>Battery power</small></span><span class="input-wrap compact"><input id="powerInput" type="number" min="0.1" max="20" step="0.1" value="3"><i>kW</i></span></label>
+            <label><span>负荷曲线 <small>Load profile</small></span><select id="profileInput"><option value="balanced">普通家庭 / Balanced</option><option value="evening">晚间集中 / Evening-heavy</option><option value="daytime">居家办公 / Daytime-heavy</option><option value="heatpump">热泵型 / Heat-pump</option></select></label>
+          </div>
+        </details>
+
+        <div class="callout">
+          <strong>容量建议</strong>
+          <p id="sizingHint">—</p>
+        </div>
+      </aside>
+
+      <section class="results panel" aria-live="polite">
+        <div class="panel-title"><div><span class="step">02</span><h2>计算结果</h2></div><span class="muted">当前场景 / Current case</span></div>
+        <div class="metrics">
+          <article class="metric primary"><span>光伏自用率 <small>Self-consumption</small></span><strong id="scrValue">—</strong><div class="meter"><i id="scrBar"></i></div><p>未输出至电网的PV电量 ÷ PV发电量</p></article>
+          <article class="metric secondary"><span>家庭自给率 <small>Self-sufficiency</small></span><strong id="ssrValue">—</strong><div class="meter"><i id="ssrBar"></i></div><p>PV直接供电＋电池放电 ÷ 家庭负荷</p></article>
+        </div>
+
+        <div class="energy-flow">
+          <div class="flow-title"><h3>年度能量流</h3><span>Annual energy flow</span></div>
+          <div class="flow-grid">
+            <div><span class="dot solar"></span><small>PV发电</small><b id="pvGen">—</b></div>
+            <div><span class="dot direct"></span><small>PV直接使用</small><b id="directUse">—</b></div>
+            <div><span class="dot battery"></span><small>电池供给负荷</small><b id="batteryOut">—</b></div>
+            <div><span class="dot grid"></span><small>电网购电</small><b id="gridImport">—</b></div>
+            <div><span class="dot export"></span><small>上网/弃电</small><b id="gridExport">—</b></div>
+            <div><span class="dot cycle"></span><small>等效满循环</small><b id="cycles">—</b></div>
+          </div>
+          <div class="balance-bar" id="balanceBar" aria-label="家庭负荷供给构成"></div>
+          <div class="legend"><span><i class="direct-bg"></i>直接PV</span><span><i class="battery-bg"></i>储能</span><span><i class="grid-bg"></i>电网</span></div>
+        </div>
+      </section>
+    </section>
+
+    <section class="optimizer panel">
+      <div class="panel-title">
+        <div><span class="step">03</span><h2>第三变量优化</h2></div>
+        <span class="muted">Fix two variables, optimise the third</span>
+      </div>
+      <div class="optimizer-layout">
+        <div class="optimizer-controls">
+          <label><span>优化变量</span><select id="optVariable"><option value="battery">储能容量 / Battery</option><option value="pv">PV规模 / PV size</option><option value="load">家庭用电量 / Consumption</option></select></label>
+          <label><span>优化目标</span><select id="optMetric"><option value="scr">自用率最大 / Max self-consumption</option><option value="ssr">自给率最大 / Max self-sufficiency</option></select></label>
+          <div class="bounds">
+            <label><span>搜索下限</span><span class="input-wrap compact"><input id="optMin" type="number" value="0" step="0.1"><i id="optMinUnit">kWh</i></span></label>
+            <label><span>搜索上限</span><span class="input-wrap compact"><input id="optMax" type="number" value="15" step="0.1"><i id="optMaxUnit">kWh</i></span></label>
+          </div>
+          <button id="optimizeBtn" class="action-button" type="button">计算最优值 <span>Calculate optimum</span></button>
+          <p class="optimizer-note">最大值必须在有限搜索区间内定义。工具同时给出“95%收益拐点”，避免把无限扩容误认为工程最优。</p>
+        </div>
+        <div class="optimization-result">
+          <div class="result-copy">
+            <span class="result-label">区间内数学最大值</span>
+            <strong id="optimumValue">—</strong>
+            <p id="optimumSummary">选择搜索边界后计算。</p>
+          </div>
+          <div class="knee-card"><span>95%收益拐点 <small>95% gain knee</small></span><strong id="kneeValue">—</strong><p id="kneeSummary">—</p></div>
+          <svg id="optChart" viewBox="0 0 720 230" role="img" aria-label="优化变量与指标关系曲线"></svg>
+        </div>
+      </div>
+    </section>
+
+    <section class="economics panel">
+      <div class="panel-title"><div><span class="step">04</span><h2>家庭可负担性与经济选型</h2></div><span class="muted">Affordability &amp; economic sizing</span></div>
+      <div class="economic-layout">
+        <div class="economic-controls">
+          <label><span>收入等级 <small>2025德国净收入四分位</small></span><select id="incomeTier"><option value="23640">较低收入 Q1 · €23,640/a</option><option value="38112" selected>中等收入 Median · €38,112/a</option><option value="61200">较高收入 Q3 · €61,200/a</option><option value="custom">自定义 / Custom</option></select></label>
+          <label><span>家庭年净收入</span><span class="input-wrap compact"><input id="incomeInput" type="number" min="10000" max="300000" step="1000" value="38112"><i>€/a</i></span></label>
+          <label><span>最大投资/年收入</span><span class="input-wrap compact"><input id="budgetShare" type="number" min="5" max="100" step="1" value="20"><i>%</i></span></label>
+          <label><span>屋顶PV上限</span><span class="input-wrap compact"><input id="roofLimit" type="number" min="0.5" max="50" step="0.5" value="15"><i>kWp</i></span></label>
+          <div class="economic-assumptions">
+            <label><span>PV+逆变器+安装</span><span class="input-wrap compact"><input id="pvCost" type="number" min="0.3" max="4" step="0.05" value="1.25"><i>€/Wp</i></span></label>
+            <label><span>储能系统成本</span><span class="input-wrap compact"><input id="batteryCost" type="number" min="100" max="2000" step="25" value="700"><i>€/kWh</i></span></label>
+            <label><span>购电价</span><span class="input-wrap compact"><input id="buyPrice" type="number" min="0.1" max="1" step="0.01" value="0.34"><i>€/kWh</i></span></label>
+            <label><span>上网电价</span><span class="input-wrap compact"><input id="feedPrice" type="number" min="0" max="0.5" step="0.01" value="0.08"><i>€/kWh</i></span></label>
+          </div>
+          <button id="recommendBtn" class="action-button" type="button">推荐经济配置 <span>Maximise 20-year NPV</span></button>
+          <p class="optimizer-note">默认成本：德国屋顶PV含逆变器与安装1.25 €/Wp，储能700 €/kWh；收入档位采用Destatis 2025家庭净收入Q1/中位数/Q3。预算比例为可调情景假设。<a href="https://www.co2online.de/modernisieren-und-bauen/photovoltaik/kosten-und-finanzierung/" target="_blank" rel="noreferrer">成本来源</a> · <a href="https://www.destatis.de/DE/Themen/Gesellschaft-Umwelt/Einkommen-Konsum-Lebensbedingungen/Lebensbedingungen-Armutsgefaehrdung/Tabellen/einkommen-einkommensarten.html" target="_blank" rel="noreferrer">收入来源</a></p>
+        </div>
+        <div class="economic-result">
+          <div class="recommendation-head">
+            <div><span>推荐PV</span><strong id="recPv">—</strong></div>
+            <div><span>推荐储能</span><strong id="recBattery">—</strong></div>
+            <div><span>初始投资</span><strong id="recCapex">—</strong></div>
+          </div>
+          <div class="financial-grid">
+            <div><small>预计年收益</small><b id="recAnnual">—</b></div><div><small>20年净现值</small><b id="recNpv">—</b></div><div><small>简单回收期</small><b id="recPayback">—</b></div><div><small>自给率</small><b id="recSsr">—</b></div>
+          </div>
+          <p id="recNarrative" class="rec-narrative">以当前家庭用电量为负荷边界，在可负担预算内搜索NPV最高的PV/储能组合。</p>
+          <div class="tier-comparison">
+            <div class="flow-title"><h3>同一用电水平下的收入分档</h3><span>Income-tier comparison</span></div>
+            <div id="tierCards" class="tier-cards"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="method panel">
+      <div class="panel-title"><div><span class="step">05</span><h2>模型边界</h2></div><span class="muted">How to read the result</span></div>
+      <div class="method-grid">
+        <article><b>耦合来自时间</b><p>年总量相同不代表结果相同。模型将PV和负荷分解为8760小时，并按SOC逐小时充放电。</p></article>
+        <article><b>最大值不等于经济最优</b><p>单独追求自用率会偏向更小PV；单独追求自给率会偏向更大PV和电池。拐点通常比边界最大值更有工程意义。</p></article>
+        <article><b>收入只约束预算</b><p>收入不会改变能量耦合关系，只决定可进入候选集的投资规模。经济模块按20年NPV选择，储能不划算时会返回0 kWh。</p></article>
+      </div>
+    </section>
+  </main>
+  <footer>模型版本 1.0 · 可用容量口径 · 结果为工程估算而非收益保证</footer>
+  <script src="./app.js"></script>
+</body>
+</html>
