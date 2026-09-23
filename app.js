@@ -3,10 +3,107 @@ const $ = (id) => document.getElementById(id);
 const ids = ["loadInput","pvInput","batteryInput","yieldInput","effInput","powerInput","profileInput"];
 const defaults = {loadInput:4500,pvInput:6,batteryInput:5,yieldInput:930,effInput:90,powerInput:3,profileInput:"balanced"};
 const units = {load:"kWh/a",pv:"kWp",battery:"kWh"};
+const copy = {
+  zh:{
+    title:"家庭 PV–储能耦合计算器",
+    description:"基于 8760 小时时序仿真的家庭光伏与储能耦合计算器",
+    cycles:"次/a",
+    sizingBase:(ratio,limit)=>`储能/PV = ${ratio} kWh/kWp；基于负荷与 PV 规模的参考上限约 ${limit} kWh。`,
+    sizingLarge:" 当前容量偏大，需由备电或动态电价价值支撑。",
+    sizingSmall:" 当前容量偏小，但循环利用率通常较高。",
+    sizingNormal:" 当前比例位于常见工程区间。",
+    phaseDay:"日间 · PV 供电 / 充电",
+    phaseNight:"夜间 · 储能 / 电网供电",
+    pvCoverage:(coverage)=>`阵列规模示意 · ${coverage}%`,
+    batteryCount:(count,partial)=>partial?`${count} 块 × 2 kWh · 末块 ${partial} kWh`:`${count} 块 × 2 kWh 模块`,
+    noBattery:"未配置储能",
+    pauseAnimation:"暂停能源演示",
+    resumeAnimation:"继续能源演示",
+    scr:"自用率",ssr:"自给率",
+    optimum:(min,max,unit,metric,value)=>`在 ${min}–${max} ${unit} 内，${metric}最高为 ${value}%。`,
+    knee:(metric,value)=>`已获得区间内可实现增益的 95%，对应${metric} ${value}%。`,
+    axes:{battery:"储能容量 kWh",pv:"PV 规模 kWp",load:"年用电量 kWh/a"},
+    years:"年",
+    storageNo:"在当前价格假设下，储能的边际现金流不足，因此推荐仅配置 PV。",
+    storageYes:"储能在当前电价差、负荷曲线与预算下可增加净现值。",
+    narrative:(budget,storage)=>`可投资上限 €${budget}。${storage} 收入在模型中只约束预算，不改变物理能量平衡。`,
+    tiers:["较低收入 Q1","中等收入 Median","较高收入 Q3"],
+    tierLine:(capex,npv)=>`投资 €${capex} · NPV ${npv}`,
+    calculating:"计算中…",recommend:"推荐经济配置"
+  },
+  en:{
+    title:"Residential PV–Battery Coupling Calculator",
+    description:"Residential PV and battery coupling calculator based on an 8,760-hour chronological simulation",
+    cycles:"cycles/yr",
+    sizingBase:(ratio,limit)=>`Battery/PV = ${ratio} kWh/kWp; the load- and PV-based reference ceiling is about ${limit} kWh.`,
+    sizingLarge:" Capacity is relatively high and should be justified by backup value or dynamic tariffs.",
+    sizingSmall:" Capacity is relatively low, but utilisation is usually high.",
+    sizingNormal:" The ratio is within a common engineering range.",
+    phaseDay:"Day · PV supplies home / battery",
+    phaseNight:"Night · Battery / grid supplies home",
+    pvCoverage:(coverage)=>`Illustrative array scale · ${coverage}%`,
+    batteryCount:(count,partial)=>partial?`${count} × 2 kWh · last ${partial} kWh`:`${count} × 2 kWh modules`,
+    noBattery:"No battery installed",
+    pauseAnimation:"Pause energy animation",
+    resumeAnimation:"Resume energy animation",
+    scr:"self-consumption",ssr:"self-sufficiency",
+    optimum:(min,max,unit,metric,value)=>`Within ${min}–${max} ${unit}, maximum ${metric} is ${value}%.`,
+    knee:(metric,value)=>`This captures 95% of the achievable gain within the range, at ${value}% ${metric}.`,
+    axes:{battery:"Battery capacity kWh",pv:"PV size kWp",load:"Annual consumption kWh/yr"},
+    years:"years",
+    storageNo:"At the current price assumptions, the battery's marginal cash flow is insufficient, so PV-only is recommended.",
+    storageYes:"Storage increases NPV under the current tariff spread, load profile and budget.",
+    narrative:(budget,storage)=>`Investment ceiling: €${budget}. ${storage} Income only constrains the budget; it does not alter the physical energy balance.`,
+    tiers:["Lower income Q1","Median income","Higher income Q3"],
+    tierLine:(capex,npv)=>`Investment €${capex} · NPV ${npv}`,
+    calculating:"Calculating…",recommend:"Recommend system"
+  }
+};
+let currentLang="zh";
+let energyPhase="day";
+let energyAnimationPaused=false,energyPhaseTimer=null;
+try{currentLang=localStorage.getItem("pvcalc-language")==="en"?"en":"zh";}catch(_error){}
+const tr=(key)=>copy[currentLang][key];
 
 function clamp(v,min,max){return Math.min(max,Math.max(min,v));}
 function n(id){return Number($(id).value)||0;}
-function fmt(v,d=0){return Number(v).toLocaleString("zh-CN",{maximumFractionDigits:d,minimumFractionDigits:d});}
+function fmt(v,d=0){return Number(v).toLocaleString(currentLang==="zh"?"zh-CN":"en-US",{maximumFractionDigits:d,minimumFractionDigits:d});}
+
+function applyLanguage(lang,recalculate=true){
+  currentLang=lang==="en"?"en":"zh";
+  try{localStorage.setItem("pvcalc-language",currentLang);}catch(_error){}
+  document.documentElement.lang=currentLang==="zh"?"zh-CN":"en";
+  document.title=tr("title");
+  $("metaDescription").content=tr("description");
+  document.querySelectorAll("[data-zh][data-en]").forEach(el=>{el.textContent=el.dataset[currentLang];});
+  document.querySelectorAll(".lang-button").forEach(button=>{
+    const active=button.dataset.lang===currentLang;
+    button.classList.toggle("is-active",active);button.setAttribute("aria-pressed",String(active));
+  });
+  updatePlaybackButton();
+  if(recalculate){render();optimize();runEconomics();}
+}
+
+function pulseValue(id){
+  const el=$(id);el.classList.remove("is-updated");
+  requestAnimationFrame(()=>el.classList.add("is-updated"));
+}
+
+function updatePlaybackButton(){
+  const button=$("scenePlaybackBtn");if(!button)return;
+  button.classList.toggle("is-paused",energyAnimationPaused);
+  button.setAttribute("aria-pressed",String(energyAnimationPaused));
+  button.setAttribute("aria-label",tr(energyAnimationPaused?"resumeAnimation":"pauseAnimation"));
+}
+
+function toggleEnergyAnimation(){
+  energyAnimationPaused=!energyAnimationPaused;
+  const stage=$("homeEnergyStage"),svg=stage.querySelector("svg");
+  stage.classList.toggle("is-paused",energyAnimationPaused);
+  if(energyAnimationPaused&&svg.pauseAnimations)svg.pauseAnimations();
+  if(!energyAnimationPaused&&svg.unpauseAnimations)svg.unpauseAnimations();
+  updatePlaybackButton();
+}
 
 function makeProfiles(annualLoad,pvSize,specificYield,profile){
   const loadWeights=[],pvWeights=[];
@@ -70,21 +167,74 @@ function simulate(params){
 
 function params(){return {load:n("loadInput"),pv:n("pvInput"),battery:n("batteryInput"),yield:n("yieldInput"),eff:n("effInput"),power:n("powerInput"),profile:$("profileInput").value};}
 
+function updateEnergyPhaseLabel(){
+  $("energyPhaseLabel").textContent=tr(energyPhase==="day"?"phaseDay":"phaseNight");
+}
+
+function setEnergyPhase(phase){
+  energyPhase=phase==="night"?"night":"day";
+  $("homeEnergyStage").dataset.phase=energyPhase;
+  updateEnergyPhaseLabel();
+}
+
+function updateEnergyScene(p,r){
+  const stage=$("homeEnergyStage");
+  const coverage=Math.round(clamp(p.pv/20,0,1)*100);
+  const pvUnits=p.pv>0?Math.max(1,Math.ceil(clamp(p.pv/20,0,1)*12)):0;
+  let solarMarkup="";
+  for(let i=0;i<pvUnits;i++){
+    const row=Math.floor(i/4),col=i%4;
+    const x=45+col*36+row*4,y=43+row*38;
+    const cx=x+17,cy=y+26;
+    solarMarkup+=`<g transform="rotate(-7 ${cx} ${cy})"><image class="node-asset pv-module-image" href="./assets/pv-module.png" x="${x}" y="${y}" width="34" height="52" preserveAspectRatio="xMidYMid meet" style="animation-delay:${i*35}ms"/></g>`;
+  }
+  $("solarArray").innerHTML=solarMarkup;
+
+  const moduleKwh=2;
+  const batteryUnits=p.battery>0?Math.min(10,Math.ceil(p.battery/moduleKwh)):0;
+  let batteryMarkup="";
+  for(let i=0;i<batteryUnits;i++){
+    const remaining=clamp(p.battery-i*moduleKwh,0,moduleKwh),fraction=remaining/moduleKwh;
+    const col=Math.floor(i/5),row=i%5,x=70+col*74,y=183+row*19;
+    batteryMarkup+=`<image class="node-asset battery-unit battery-module" href="./assets/battery-module.png" x="${x}" y="${y}" width="96" height="38" preserveAspectRatio="xMidYMid meet" style="opacity:${(.48+.52*fraction).toFixed(2)};animation-delay:${i*45}ms"/>`;
+  }
+  $("batteryArray").innerHTML=batteryMarkup;
+
+  const batteryChargeActive=p.battery>0&&r.chargeIn>1;
+  const batteryDischargeActive=p.battery>0&&r.batteryOut>1;
+  const gridActive=r.gridImport>1;
+  stage.dataset.hasPv=String(p.pv>0);stage.dataset.hasBattery=String(p.battery>0);
+  stage.dataset.batteryActive=String(batteryDischargeActive);
+  stage.dataset.batteryChargeActive=String(batteryChargeActive);
+  stage.dataset.batteryDischargeActive=String(batteryDischargeActive);
+  stage.dataset.gridActive=String(gridActive);
+  stage.style.setProperty("--grid-flow-opacity",String(clamp(.28+.9*r.gridImport/Math.max(1,r.load),.28,.82)));
+  $("scenePvValue").textContent=fmt(p.pv,1)+" kWp";
+  $("sceneModuleCount").textContent=tr("pvCoverage")(coverage);
+  $("sceneBatteryValue").textContent=fmt(p.battery,1)+" kWh";
+  const finalModuleKwh=p.battery>0?p.battery-(batteryUnits-1)*moduleKwh:0;
+  const partialModule=finalModuleKwh>0&&finalModuleKwh<moduleKwh?fmt(finalModuleKwh,1):"";
+  $("sceneBatteryCount").textContent=p.battery>0?tr("batteryCount")(batteryUnits,partialModule):tr("noBattery");
+  updateEnergyPhaseLabel();
+}
+
 function render(){
   const p=params(),r=simulate(p);
   $("scrValue").textContent=fmt(r.scr,1)+"%"; $("ssrValue").textContent=fmt(r.ssr,1)+"%";
+  pulseValue("scrValue");pulseValue("ssrValue");
   $("scrBar").style.width=clamp(r.scr,0,100)+"%"; $("ssrBar").style.width=clamp(r.ssr,0,100)+"%";
   $("pvGen").textContent=fmt(r.pv)+" kWh"; $("directUse").textContent=fmt(r.direct)+" kWh";
   $("batteryOut").textContent=fmt(r.batteryOut)+" kWh"; $("gridImport").textContent=fmt(r.gridImport)+" kWh";
-  $("gridExport").textContent=fmt(r.gridExport)+" kWh"; $("cycles").textContent=fmt(r.cycles)+" 次/a";
+  $("gridExport").textContent=fmt(r.gridExport)+" kWh"; $("cycles").textContent=fmt(r.cycles)+" "+tr("cycles");
   const direct=100*r.direct/r.load,bat=100*r.batteryOut/r.load,grid=100*r.gridImport/r.load;
   $("balanceBar").innerHTML=`<span class="direct-bg" style="width:${direct}%"></span><span class="battery-bg" style="width:${bat}%"></span><span class="grid-bg" style="width:${grid}%"></span>`;
   const ratio=p.pv>0?p.battery/p.pv:0, demandLimit=1.5*p.load/1000, pvLimit=1.5*p.pv;
-  let hint=`储能/PV = ${fmt(ratio,2)} kWh/kWp；HTW型上限约 ${fmt(Math.min(demandLimit,pvLimit),1)} kWh。`;
-  if(ratio>1.5) hint+=" 当前容量偏大，需由备电或动态电价价值支撑。";
-  else if(ratio<.6&&p.battery>0) hint+=" 当前容量偏小但循环利用率通常较高。";
-  else hint+=" 当前比例位于常见工程区间。";
+  let hint=tr("sizingBase")(fmt(ratio,2),fmt(Math.min(demandLimit,pvLimit),1));
+  if(ratio>1.5) hint+=tr("sizingLarge");
+  else if(ratio<.6&&p.battery>0) hint+=tr("sizingSmall");
+  else hint+=tr("sizingNormal");
   $("sizingHint").textContent=hint;
+  updateEnergyScene(p,r);
 }
 
 function setRangePair(input,range){
@@ -114,11 +264,11 @@ function optimize(){
   const start=pts[0].y,gain=best.y-start,target=start+.95*Math.max(0,gain);
   let knee=pts.find(pt=>pt.y>=target)||best;
   if(metric==="scr"&&best.x===min){knee=best;}
-  const unit=units[variable],metricName=metric==="scr"?"自用率":"自给率";
+  const unit=units[variable],metricName=metric==="scr"?tr("scr"):tr("ssr");
   $("optimumValue").textContent=`${fmt(best.x,variable==="load"?0:1)} ${unit}`;
-  $("optimumSummary").textContent=`在 ${fmt(min)}–${fmt(max)} ${unit} 内，${metricName}最高为 ${fmt(best.y,1)}%。`;
+  $("optimumSummary").textContent=tr("optimum")(fmt(min),fmt(max),unit,metricName,fmt(best.y,1));
   $("kneeValue").textContent=`${fmt(knee.x,variable==="load"?0:1)} ${unit}`;
-  $("kneeSummary").textContent=`已获得区间内可实现增益的95%，对应${metricName} ${fmt(knee.y,1)}%。`;
+  $("kneeSummary").textContent=tr("knee")(metricName,fmt(knee.y,1));
   drawChart(pts,best,knee,variable,metricName);
 }
 
@@ -127,8 +277,8 @@ function drawChart(pts,best,knee,variable,metricName){
   const xmin=pts[0].x,xmax=pts.at(-1).x,ymin=Math.max(0,Math.min(...pts.map(p=>p.y))-5),ymax=Math.min(100,Math.max(...pts.map(p=>p.y))+5);
   const sx=x=>pad.l+(x-xmin)/(xmax-xmin)*(W-pad.l-pad.r),sy=y=>H-pad.b-(y-ymin)/(Math.max(1,ymax-ymin))*(H-pad.t-pad.b);
   const path=pts.map((p,i)=>`${i?"L":"M"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
-  const grid=[0,.25,.5,.75,1].map(q=>{const y=pad.t+q*(H-pad.t-pad.b);const val=ymax-q*(ymax-ymin);return `<line x1="${pad.l}" y1="${y}" x2="${W-pad.r}" y2="${y}" stroke="#203b4a"/><text x="${pad.l-9}" y="${y+4}" text-anchor="end" fill="#78909b" font-size="11">${fmt(val,0)}%</text>`}).join("");
-  svg.innerHTML=`${grid}<path d="${path}" fill="none" stroke="#ffbd4a" stroke-width="3"/><circle cx="${sx(best.x)}" cy="${sy(best.y)}" r="6" fill="#ffbd4a"/><circle cx="${sx(knee.x)}" cy="${sy(knee.y)}" r="5" fill="#68d7ca"/><text x="${pad.l}" y="${H-12}" fill="#91a8b3" font-size="11">${variable==="battery"?"储能容量 kWh":variable==="pv"?"PV规模 kWp":"年用电量 kWh/a"}</text><text x="${W-pad.r}" y="${H-12}" text-anchor="end" fill="#91a8b3" font-size="11">${metricName}</text>`;
+  const grid=[0,.25,.5,.75,1].map(q=>{const y=pad.t+q*(H-pad.t-pad.b);const val=ymax-q*(ymax-ymin);return `<line x1="${pad.l}" y1="${y}" x2="${W-pad.r}" y2="${y}" stroke="#dededb"/><text x="${pad.l-9}" y="${y+4}" text-anchor="end" fill="#777" font-size="11">${fmt(val,0)}%</text>`}).join("");
+  svg.innerHTML=`${grid}<path d="${path}" fill="none" stroke="#e1251b" stroke-width="3"/><circle cx="${sx(best.x)}" cy="${sy(best.y)}" r="6" fill="#e1251b"/><circle cx="${sx(knee.x)}" cy="${sy(knee.y)}" r="5" fill="#168b82"/><text x="${pad.l}" y="${H-12}" fill="#777" font-size="11">${tr("axes")[variable]}</text><text x="${W-pad.r}" y="${H-12}" text-anchor="end" fill="#777" font-size="11">${metricName}</text>`;
 }
 
 function financialCase(base,pv,battery,finance){
@@ -169,24 +319,25 @@ function paintRecommendation(rec){
   $("recPv").textContent=fmt(rec.pv,1)+" kWp";$("recBattery").textContent=fmt(rec.battery,1)+" kWh";
   $("recCapex").textContent="€"+fmt(rec.capex);$("recAnnual").textContent="€"+fmt(rec.annual)+"/a";
   $("recNpv").textContent=(rec.npv>=0?"€":"−€")+fmt(Math.abs(rec.npv));
-  $("recPayback").textContent=Number.isFinite(rec.payback)?fmt(rec.payback,1)+" 年":"—";
+  $("recPayback").textContent=Number.isFinite(rec.payback)?fmt(rec.payback,1)+" "+tr("years"):"—";
   $("recSsr").textContent=fmt(rec.result.ssr,1)+"%";
-  const storageText=rec.battery===0?"在当前价格假设下，储能的边际现金流不足，因此推荐仅配置PV。":"储能在当前电价差、负荷曲线与预算下可增加净现值。";
-  $("recNarrative").textContent=`可投资上限 €${fmt(rec.budget)}。${storageText} 收入在模型中只约束预算，不改变物理能量平衡。`;
+  const storageText=rec.battery===0?tr("storageNo"):tr("storageYes");
+  $("recNarrative").textContent=tr("narrative")(fmt(rec.budget),storageText);
 }
 
 function renderTierCards(base,finance){
-  const tiers=[{name:"较低收入 Q1",income:23640},{name:"中等收入 Median",income:38112},{name:"较高收入 Q3",income:61200}];
+  const tierNames=tr("tiers");
+  const tiers=[{name:tierNames[0],income:23640},{name:tierNames[1],income:38112},{name:tierNames[2],income:61200}];
   const recs=tiers.map(t=>({...t,rec:recommendForIncome(t.income,base,finance)}));
-  $("tierCards").innerHTML=recs.map(({name,income,rec})=>`<article class="tier-card"><span>${name} · €${fmt(income)}/a</span><strong>${fmt(rec.pv,1)} kWp + ${fmt(rec.battery,1)} kWh</strong><p>投资 €${fmt(rec.capex)} · NPV ${rec.npv>=0?"€":"−€"}${fmt(Math.abs(rec.npv))}</p></article>`).join("");
+  $("tierCards").innerHTML=recs.map(({name,income,rec})=>`<article class="tier-card"><span>${name} · €${fmt(income)}/a</span><strong>${fmt(rec.pv,1)} kWp + ${fmt(rec.battery,1)} kWh</strong><p>${tr("tierLine")(fmt(rec.capex),(rec.npv>=0?"€":"−€")+fmt(Math.abs(rec.npv)))}</p></article>`).join("");
 }
 
 function runEconomics(){
-  const button=$("recommendBtn");button.disabled=true;button.firstChild.textContent="计算中… ";
+  const button=$("recommendBtn"),label=button.querySelector("b");button.disabled=true;label.textContent=tr("calculating");
   setTimeout(()=>{
     const base=params(),finance=financeParams(),income=n("incomeInput");
     const rec=recommendForIncome(income,base,finance);paintRecommendation(rec);renderTierCards(base,finance);
-    button.disabled=false;button.firstChild.textContent="推荐经济配置 ";
+    button.disabled=false;label.textContent=tr("recommend");
   },20);
 }
 
@@ -195,7 +346,26 @@ $("incomeTier").addEventListener("change",()=>{if($("incomeTier").value!=="custo
 $("incomeInput").addEventListener("input",()=>{$("incomeTier").value="custom";});
 $("recommendBtn").addEventListener("click",runEconomics);
 $("resetBtn").addEventListener("click",()=>{Object.entries(defaults).forEach(([id,v])=>$(id).value=v);$("loadRange").value=4500;$("pvRange").value=6;$("batteryRange").value=5;$("incomeTier").value="38112";$("incomeInput").value=38112;$("budgetShare").value=20;$("roofLimit").value=15;$("pvCost").value=1.25;$("batteryCost").value=700;$("buyPrice").value=.34;$("feedPrice").value=.08;syncOptBounds();render();optimize();runEconomics();});
+document.querySelectorAll(".lang-button").forEach(button=>button.addEventListener("click",()=>applyLanguage(button.dataset.lang)));
+$("scenePlaybackBtn").addEventListener("click",toggleEnergyAnimation);
+applyLanguage(currentLang,false);
 syncOptBounds();render();optimize();runEconomics();
+
+function initMotion(){
+  if(matchMedia("(prefers-reduced-motion: reduce)").matches)return;
+  document.documentElement.classList.add("motion-ready");
+  const observer=new IntersectionObserver(entries=>entries.forEach(entry=>{
+    if(entry.isIntersecting){entry.target.classList.add("is-visible");observer.unobserve(entry.target);}
+  }),{threshold:.08,rootMargin:"0px 0px -30px"});
+  document.querySelectorAll(".reveal").forEach(panel=>observer.observe(panel));
+}
+initMotion();
+
+function initEnergyPhaseMotion(){
+  if(matchMedia("(prefers-reduced-motion: reduce)").matches)return;
+  energyPhaseTimer=setInterval(()=>{if(!energyAnimationPaused)setEnergyPhase(energyPhase==="day"?"night":"day");},4400);
+}
+initEnergyPhaseMotion();
 
 function registerModelTool(){
   const context=document.modelContext;
